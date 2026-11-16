@@ -21,9 +21,13 @@ Urban Retail Placemaking is a Columbia Business School elective where MBA studen
 
 ## Screenshots
 
-| Field notebook on a phone | Assignment builder |
-| --- | --- |
-| ![Field notebook on mobile](docs/screenshots/notebook-mobile.png) | ![Assignment builder](docs/screenshots/assignment-builder-clean.png) |
+**Assignment builder:** students assemble their package and see what's still missing before they submit.
+
+![Assignment builder](docs/screenshots/assignment-builder-clean.png)
+
+**Field notebook on a phone:** structured, cloud-saved notes captured in the store during a trek.
+
+<img src="docs/screenshots/notebook-mobile.png" alt="Field notebook on mobile" width="320">
 
 ## Architecture
 
