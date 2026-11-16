@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';import {resolve,dirname} from 'node:path';import vm from 'node:vm';import ts from 'typescript';import {DatabaseSync} from 'node:sqlite';import {webcrypto} from 'node:crypto';
+const db=new DatabaseSync(':memory:');db.exec(`CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT,course TEXT,owner TEXT,group_id TEXT,parent TEXT,data TEXT,updated TEXT);CREATE TABLE users(id TEXT PRIMARY KEY,uni TEXT UNIQUE,name TEXT,role TEXT,course TEXT,disabled INTEGER,group_id TEXT,canvas_id INTEGER,email TEXT,password TEXT,must_change INTEGER);CREATE TABLE sessions(id TEXT,user_id TEXT);CREATE TABLE audit(id TEXT PRIMARY KEY,actor TEXT,action TEXT,target TEXT,at TEXT);`);
+const objects=new Map();let failBatch=false;
+function prepare(sql){let args=[];return{bind(...a){args=a;return this},async all(){return{results:db.prepare(sql).all(...args)}},async first(){return db.prepare(sql).get(...args)||null},sync(){return{meta:db.prepare(sql).run(...args)}},async run(){return this.sync()}};}
+const env={DB:{prepare,async batch(xs){if(failBatch){failBatch=false;throw Error('transaction failed')}db.exec('BEGIN');try{const r=xs.map(x=>x.sync());db.exec('COMMIT');return r}catch(e){db.exec('ROLLBACK');throw e}}},BUCKET:{async put(k,v){objects.set(k,v)},async get(k){return objects.has(k)?{json:async()=>JSON.parse(objects.get(k))}:null}}};
+const cache=new Map();function load(file){file=resolve(file);if(cache.has(file))return cache.get(file).exports;const m={exports:{}};cache.set(file,m);const code=ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;vm.runInNewContext(`(function(require,module,exports){${code}\n})`,{crypto:webcrypto,Date,TextEncoder,Response,Request,URL,Uint8Array})(s=>s==='cloudflare:workers'?{env}:load(resolve(dirname(file),s+'.ts')),m,m.exports);return m.exports;}
+const server=load('lib/server.ts'),{launchTransition}=load('lib/launch-transition.ts');
+const owner={uni:'owner01',role:'staff',course:'live',id:'jack'},password='synthetic-test-password-only';
+for(const [id,course,role] of [['old','sandbox','student'],['demo','demo','student'],['real','live','student'],['historical','archive','student']])db.prepare('INSERT INTO users(id,uni,name,role,course,disabled,password,must_change) VALUES(?,?,?,?,?,1,?,0)').run(id,id,id,role,course,'unchanged-password-hash');
+db.prepare("INSERT INTO sessions VALUES('old-session','old')").run();
+await server.save('meta','live','live-roster',{currentStudentIds:['real'],syncedAt:new Date().toISOString()});
+await server.save('assignment','live','a',{title:'Current assignment',due:'2026-11-09T17:00:00Z',published:true});
+await server.save('event','live','e',{title:'Session 1',assignmentIds:['a'],readings:[{title:'Reading',type:'required'}]});
+await server.save('submission','live','live-work',{text:'private real work'},'real');
+await server.save('submission','sandbox','old-work',{text:'historical copy'},'old');
+await server.save('meta','sandbox','review-engine:sandbox',{old:true});
+await server.save('submission','archive','original',{text:'original'},'historical');
+await assert.rejects(launchTransition({...owner,uni:'not-owner'},{action:'transition',testPassword:password}),/owner only/);
+failBatch=true;await assert.rejects(launchTransition(owner,{action:'transition',testPassword:password}),/transaction/);
+assert.equal((await server.records('submission','sandbox')).length,1);assert(db.prepare("SELECT * FROM sessions WHERE id='old-session'").get());
+const result=await launchTransition(owner,{action:'transition',testPassword:password});assert(result.ok);assert.equal((await server.records('submission','sandbox')).length,0);assert.equal((await server.records('submission','retired-sandbox')).length,1);assert.equal((await server.records('submission','archive')).length,1);assert.equal((await server.records('submission','live')).length,1);
+assert.equal(db.prepare("SELECT COUNT(*) n FROM sessions").get().n,0);
+assert.equal(db.prepare("SELECT disabled FROM users WHERE id='old'").get().disabled,1);
+const test=db.prepare("SELECT * FROM users WHERE uni='test-student'").get();assert.equal(test.canvas_id,null);assert.equal(test.course,'sandbox');assert.equal(test.disabled,0);assert(await server.verify(password,test.password));
+assert.deepEqual(JSON.parse(JSON.stringify((await server.records('event','sandbox'))[0].assignmentIds)),['fa26-test:a']);
+assert.equal((await server.records('assignment','sandbox')).length,1);
+await server.save('meta','sandbox','review-engine:sandbox',{fresh:true});assert((await server.getRecord('review-engine:sandbox','meta','sandbox')).fresh);
+assert((await launchTransition(owner,{action:'transition',testPassword:password})).reused);
+await launchTransition(owner,{action:'prepare-student',id:'real',password});assert.equal(db.prepare("SELECT disabled FROM users WHERE id='real'").get().disabled,1);assert.equal(db.prepare("SELECT must_change FROM users WHERE id='real'").get().must_change,1);
+assert((await launchTransition(owner,{action:'prepare-student',id:'real',password:'another-long-password-example'})).reused);
+await assert.rejects(launchTransition(owner,{action:'prepare-student',id:'old',password}),/current student/);
+await launchTransition(owner,{action:'prepare-staff',uni:'instructor01',password});assert.equal(db.prepare("SELECT disabled FROM users WHERE uni='instructor01'").get().disabled,1);assert((await launchTransition(owner,{action:'prepare-staff',uni:'instructor01',password})).reused);await assert.rejects(launchTransition(owner,{action:'prepare-staff',uni:'unknown',password}),/Unknown/);
+for(const b of result.backups){const saved=JSON.parse(objects.get(b.key));assert(!JSON.stringify(saved).includes('password'));}
+const {allowedCanvasTest}=load('lib/canvas-test.ts');
+await server.save('meta','sandbox','canvas-test-authorization',{packageId:'test-package',expires:Date.now()+10000,canvasUser:2000176,assignment:2000154});
+assert(await allowedCanvasTest({id:'fa26-test-student',uni:'test-student'},'sandbox','test-package'));
+assert(!await allowedCanvasTest({id:'real',uni:'test-student'},'sandbox','test-package'));
+assert(!await allowedCanvasTest({id:'fa26-test-student',uni:'test-student'},'live','test-package'));
+assert(!await allowedCanvasTest({id:'fa26-test-student',uni:'test-student'},'sandbox','different-package'));
+await launchTransition(owner,{action:'retire-archive'});assert.equal(db.prepare("SELECT disabled FROM users WHERE id='historical'").get().disabled,1);assert((await launchTransition(owner,{action:'retire-archive'})).reused);
+console.log('PASS owner guard, rollback, backup readback, retirement, session revocation, test data/Canvas isolation, reference mapping, scheduler singleton, idempotency and disabled onboarding.');

@@ -1,0 +1,13 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {projectMilestones,isProjectMilestone} from '../lib/project-milestones.ts';
+const old=[{id:'live-milestone-7',title:'Work-in-progress presentation',due:'2026-11-16T17:00:00Z'},{id:'live-milestone-10',title:'Final',due:'2026-12-07T17:00:00Z'}];
+const before=JSON.stringify(old),result=projectMilestones(old,[{title:'Session 6 · Client presentations',date:'2026-12-08T19:20:00Z'}]);
+assert.deepEqual(result.map(m=>m.title),['Opening brief with client','Interim project review','Final presentation']);
+assert.equal(result[0].due,null);assert.equal(result[1].due,null);assert.equal(result[2].due,'2026-12-08T19:20:00Z');assert.equal(JSON.stringify(old),before);
+assert(result.every(m=>isProjectMilestone(m.id)));assert(!isProjectMilestone('other'));
+assert.equal(projectMilestones([],[]).length,3);
+assert.equal(projectMilestones([{id:'project-opening-brief',due:'2026-11-02'}],[])[0].due,'2026-11-02');
+const route=readFileSync('app/trek-preview/page.tsx','utf8'),workspace=readFileSync('app/workspace.tsx','utf8');
+assert(route.includes("redirect('/?section=treks')"));assert(!route.includes('public-preview'));assert(!workspace.includes('<h3>Client meeting</h3>'));assert(workspace.includes('view === "treks" && <TrekWorkspace'));assert(workspace.includes('initialView===\'treks\'?\'treks\''));
+console.log('PASS exactly3stages, distinct presentation/submission dates, preserved history, valid upload tags, legacy redirect and embedded Treks');

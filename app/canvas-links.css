@@ -1,0 +1,14 @@
+.canvas-link-options{display:inline-flex;flex-wrap:wrap;align-items:center;gap:.6rem;max-width:100%}
+.canvas-link-options .session-link{margin-left:0}
+.canvas-app-link,.canvas-reading-title,.canvas-reading-actions{display:none!important}
+.reading-link-body{flex:1;min-width:0}
+@media(max-width:767px),(pointer:coarse){
+ .canvas-link-options{align-items:center;margin-top:.5rem}
+ .canvas-link-options .canvas-app-link{display:inline-flex!important;align-items:center;justify-content:center;gap:.4rem;padding:.65rem .8rem;min-height:44px;border-radius:8px;background:#1d4f91;color:#fff;font-size:.85rem;text-decoration:none;border:1px solid #1d4f91;line-height:1.3}
+ .canvas-link-options .session-link{min-height:44px;display:inline-flex;align-items:center;white-space:normal}
+ .has-canvas-app .session-link,.reading-link-body>.canvas-reading-web{display:none!important}
+ .canvas-reading-title{display:block!important}
+ .canvas-reading-actions{display:block!important}
+ .reading-row .canvas-link-options a{flex:initial;gap:.4rem}
+ .reading-row .canvas-link-options a svg{margin-top:0}
+}

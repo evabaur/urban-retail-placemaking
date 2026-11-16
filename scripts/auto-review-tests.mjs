@@ -1,0 +1,44 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {resolve,dirname} from 'node:path';
+import vm from 'node:vm';
+import ts from 'typescript';
+import {DatabaseSync} from 'node:sqlite';
+import {webcrypto} from 'node:crypto';
+const db=new DatabaseSync(':memory:');
+db.exec(`CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT,course TEXT,owner TEXT,group_id TEXT,parent TEXT,data TEXT,updated TEXT);
+CREATE TABLE users(id TEXT PRIMARY KEY,uni TEXT,name TEXT,role TEXT,course TEXT,disabled INTEGER,group_id TEXT,canvas_id INTEGER,email TEXT);
+CREATE TABLE audit(id TEXT PRIMARY KEY,actor TEXT,action TEXT,target TEXT,at TEXT);`);
+let failBatch=false;const objects=new Map();
+function prepare(sql){let args=[];return {bind(...a){args=a;return this},async all(){return {results:db.prepare(sql).all(...args)}},async first(){return db.prepare(sql).get(...args)||null},sync(){return {meta:db.prepare(sql).run(...args)}},async run(){return this.sync()}};}
+const environment={DB:{prepare,async batch(items){if(failBatch){failBatch=false;throw Error('injected transaction failure')}db.exec('BEGIN');try{const r=items.map(i=>i.sync());db.exec('COMMIT');return r}catch(e){db.exec('ROLLBACK');throw e}}},BUCKET:{async put(k,v){objects.set(k,v);},async get(k){return objects.has(k)?{body:objects.get(k),json:async()=>JSON.parse(objects.get(k))}:null}},CANVAS_RELAY_KEY:'test-key-not-a-real-secret'};
+const cache=new Map();
+function load(file){file=resolve(file);if(cache.has(file))return cache.get(file).exports;const mod={exports:{}};cache.set(file,mod);const code=ts.transpileModule(readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const req=s=>s==='cloudflare:workers'?{env:environment}:load(resolve(dirname(file),s+'.ts'));vm.runInNewContext(`(function(require,module,exports){${code}\n})`,{console,crypto:webcrypto,Date,TextEncoder,Response,Request,URL,AbortSignal,fetch,Uint8Array})(req,mod,mod.exports);return mod.exports;}
+const {roundPlan}=load('lib/review-round-plan.ts'),{reviewWindow}=load('lib/review-window.ts');
+const due=new Date(Date.now()-60000).toISOString(),a={id:'fixture',due,rubric:[{id:'r',title:'Evidence',points:3}],assignmentType:'vpa',published:true,demoReviewRound:true};
+const roster=Array.from({length:40},(_,i)=>'s'+i),sub=owner=>({id:owner,owner,submittedAt:new Date(Date.parse(due)-1000).toISOString(),text:'Evidence'});
+assert.equal(roundPlan(a,roster,[],Date.parse(due)-1).status,'scheduled');
+assert.equal(roundPlan(a,roster,[]).status,'waiting-for-submissions');
+assert.equal(roundPlan({...a,due:null},roster,[]).status,'missing-deadline');
+assert.equal(roundPlan(a,roster,[],Date.parse(due)+7*86400000).status,'expired');
+assert.equal(roundPlan(a,roster,[{...sub('s0'),text:'',reviewFiles:[]}]).status,'needs-materials');
+assert.equal(roundPlan(a,roster,[{...sub('s0'),materialsIncomplete:true}]).status,'needs-materials');
+for(let n=1;n<=40;n++){const p=roundPlan(a,roster,roster.slice(0,n).map(sub));assert.equal(p.allocations.length,n===1?39:40);assert.equal(new Set(p.allocations.map(x=>x.reviewer)).size,p.allocations.length);assert(p.allocations.every(x=>x.reviewer!==x.author));const counts=roster.slice(0,n).map(u=>p.allocations.filter(x=>x.author===u).length);assert(Math.max(...counts)-Math.min(...counts)<=1);}
+assert.equal(roundPlan(a,roster,[{...sub('s0'),submittedAt:new Date().toISOString()}]).status,'waiting-for-submissions','late uploads excluded');
+for(const id of roster)db.prepare('INSERT INTO users(id,uni,name,role,course,disabled) VALUES(?,?,?,?,?,0)').run(id,id,id,'student','sandbox');
+const server=load('lib/server.ts'),engine=load('lib/review-engine.ts');
+await server.save('assignment','sandbox',a.id,a);for(const id of roster.slice(0,3))await server.save('submission','sandbox','sub:'+id,{...sub(id),files:[]},id,null,a.id);
+failBatch=true;await assert.rejects(engine.dispatchReviews('sandbox'),/injected/);
+assert.equal((await server.records('allocation','sandbox')).length,0,'failed transaction has no partial invitations');
+const beforePlan=JSON.stringify((await server.records('peer-round','sandbox'))[0].allocations);
+await Promise.all([engine.dispatchReviews('sandbox'),engine.dispatchReviews('sandbox')]);
+const allocated=await server.records('allocation','sandbox');assert.equal(allocated.length,40);assert.equal(new Set(allocated.map(x=>x.owner)).size,40);
+assert.equal(JSON.stringify((await server.records('peer-round','sandbox'))[0].allocations),beforePlan,'retry cannot rerandomize');
+const before=JSON.stringify(allocated);await server.save('submission','sandbox','late',{...sub('s9'),submittedAt:new Date().toISOString()},'s9',null,a.id);await engine.dispatchReviews('sandbox');assert.equal(JSON.stringify(await server.records('allocation','sandbox')),before);
+assert.equal((await server.records('review-submission','sandbox')).length,3);
+assert(objects.has('backups/sandbox/latest.json'));
+await assert.rejects(engine.dispatchReviews('live'),/not released/);assert.equal((await server.records('allocation','live')).length,0);
+await assert.rejects(engine.handleReviewRounds(new Request('https://example.com/api/review-rounds'),{role:'student'},'sandbox'),/Staff only/);
+await assert.rejects(engine.scheduledReviewTick(new Request('https://example.com/api/review-tick',{method:'POST'})),/Unauthorized/);
+assert(!reviewWindow(allocated[0],a,Date.parse(allocated[0].expiresAt)).open);
+console.log('PASS 40 cohort distributions; timing/zero/one/late/material guards; transactional failure recovery; concurrent idempotency; frozen snapshots; live lock; auth; R2 backup.');

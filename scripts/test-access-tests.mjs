@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';import ts from 'typescript';import vm from 'node:vm';import {createHash,randomUUID} from 'node:crypto';
+let operator=null,target={id:'fa26-test-student',uni:'teststudent',course:'sandbox',role:'student',password:'hashed-password',disabled:0,must_change:0};const records=new Map(),events=[];
+const mock={check:(ok,m,status=400)=>{if(!ok)throw Object.assign(Error(m),{status})},hash:async s=>createHash('sha256').update(s).digest('hex'),passwordHash:async()=> 'mock-hash',one:async()=>target,identity:async()=>operator,run:async()=>records.clear(),audit:async(...e)=>events.push(e),save:async(k,c,id,d,owner)=>records.set(id,{...d,owner}),getRecord:async id=>records.get(id),rateLimit:async()=>{},string:(v,n)=>{assert.equal(typeof v,'string');assert(v.length<=n);return v},uid:randomUUID,session:async(req,u)=>{assert.equal(u.id,'fa26-test-student');assert.equal(u.course,'sandbox');return 'test-session'}};
+const mod={exports:{}};const code=ts.transpileModule(readFileSync('lib/test-access.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;vm.runInNewContext(`(function(require,module,exports){${code}})`,{Date,Response,URL})(()=>mock,mod,mod.exports);
+const call=b=>mod.exports.testAccess(new Request('https://app.example.com/api/test-access',{method:'POST',body:JSON.stringify(b)}));
+await assert.rejects(call({action:'create'}),/Owner only/);operator={uni:'owner01',role:'staff',course:'live',id:'owner'};
+let data=await(await call({action:'create'})).json(),token=new URL(data.url).hash.slice(1);assert.equal(token.length,72);assert(!JSON.stringify([...records]).includes(token));assert.equal((await call({action:'redeem',token})).headers.get('Set-Cookie'),'test-session');
+assert.equal((await call({action:'redeem',token})).status,200);await assert.rejects(call({action:'redeem',token:'wrong'}),/Invalid/);
+for(const r of records.values())r.expires=0;await assert.rejects(call({action:'redeem',token}),/expired/);
+data=await(await call({action:'create'})).json();token=new URL(data.url).hash.slice(1);target.password='changed';await assert.rejects(call({action:'redeem',token}),/expired/);
+data=await(await call({action:'create'})).json();token=new URL(data.url).hash.slice(1);await call({action:'revoke'});await assert.rejects(call({action:'redeem',token}),/expired/);
+data=await(await call({action:'create',nonExpiring:true})).json();assert.equal(data.expires,null);token=new URL(data.url).hash.slice(1);assert.equal((await call({action:'redeem',token})).status,200);
+await call({action:'configure',uni:'teststudent',password:'synthetic-test-password'});await assert.rejects(call({action:'redeem',token}),/expired/);
+operator=null;await assert.rejects(call({action:'configure',uni:'teststudent',password:'synthetic-test-password'}),/Owner only/);
+target.course='live';await assert.rejects(call({action:'create'}),/unavailable/);assert(!JSON.stringify(events).includes(token));
+console.log('PASS owner-only issue/revoke, sandbox-only target, hash-only storage, expiry, password invalidation, repeat redemption, no secret audit');
